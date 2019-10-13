@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use futures_core::future::{Future, BoxFuture};
 use futures_channel::{mpsc, oneshot};
-use futures_util::{future::FutureExt, stream::StreamExt};
+use futures_util::{lock::Mutex, future::FutureExt, stream::StreamExt};
 
 use yansi::Paint;
 use state::Container;
@@ -16,6 +16,7 @@ use crate::{logger, handler};
 use crate::config::{self, Config, LoggedValue};
 use crate::request::{Request, FormItems};
 use crate::data::Data;
+use crate::message::{Broker, Receiver};
 use crate::response::{Body, Response};
 use crate::router::{Router, Route};
 use crate::catcher::{self, Catcher};
@@ -35,6 +36,8 @@ use crate::http::uri::Origin;
 pub struct Rocket {
     pub(crate) config: Config,
     router: Router,
+    upgrades: Arc<Mutex<Vec<Arc<Mutex<hyper::Upgraded>>>>>,
+    broker: Broker,
     default_catchers: HashMap<u16, Catcher>,
     catchers: HashMap<u16, Catcher>,
     pub(crate) state: Container,
@@ -60,6 +63,12 @@ fn hyper_service_fn(
     let (tx, rx) = oneshot::channel();
 
     tokio::spawn(async move {
+        if hyp_req.headers().contains_key("upgrade") {
+            let r = rocket.handle_upgrade(hyp_req);
+            rocket.issue_response(r, tx).await;
+            return;
+        }
+
         // Get all of the information from Hyper.
         let (h_parts, h_body) = hyp_req.into_parts();
 
@@ -98,7 +107,7 @@ impl Rocket {
         &self,
         response: Response<'r>,
         tx: oneshot::Sender<hyper::Response<hyper::Body>>,
-    ) -> impl Future<Output = ()> + 'r {
+    ) -> impl Future<Output=()> + 'r {
         let result = self.write_response(response, tx);
         async move {
             match result.await {
@@ -117,7 +126,7 @@ impl Rocket {
         &self,
         mut response: Response<'r>,
         tx: oneshot::Sender<hyper::Response<hyper::Body>>,
-    ) -> impl Future<Output = io::Result<()>> + 'r {
+    ) -> impl Future<Output=io::Result<()>> + 'r {
         async move {
             let mut hyp_res = hyper::Response::builder();
             hyp_res.status(response.status().code);
@@ -164,6 +173,25 @@ impl Rocket {
 
             Ok(())
         }
+    }
+
+    #[inline]
+    fn handle_upgrade(&self, req: hyper::Request<hyper::Body>) -> Response<'_> {
+        let upgrades = self.upgrades.clone();
+
+        tokio::spawn(async move {
+            match req.into_body().on_upgrade().await {
+                Ok(upgraded) => {
+                    let mut upgrades = upgrades.lock().await;
+                    upgrades.push(Arc::new(Mutex::new(upgraded)));
+                }
+                Err(e) => error!("upgrade error: {}", e)
+            };
+        });
+
+        Response::build()
+            .status(Status::SwitchingProtocols)
+            .finalize()
     }
 }
 
@@ -441,9 +469,13 @@ impl Rocket {
 
         let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
 
+        let upgrades = Arc::new(Mutex::new(Vec::new()));
+
         let rocket = Rocket {
             config,
             router: Router::new(),
+            upgrades: upgrades.clone(),
+            broker:Broker::new(upgrades.clone()),
             default_catchers: catcher::defaults::get(),
             catchers: catcher::defaults::get(),
             state: Container::new(),
@@ -541,6 +573,12 @@ impl Rocket {
             self.router.add(route);
         }
 
+        self
+    }
+
+    #[inline]
+    pub fn receivers(mut self, receivers: Vec<Receiver>) -> Self {
+        self.broker.extend_with(receivers);
         self
     }
 
@@ -727,6 +765,8 @@ impl Rocket {
         let mut shutdown_receiver = self.shutdown_receiver
             .take().expect("shutdown receiver has already been used");
 
+        let broker = std::mem::replace(&mut self.broker, Broker::empty());
+
         let rocket = Arc::new(self);
         let service = hyper::make_service_fn(move |connection: &<L as Listener>::Connection| {
             let rocket = rocket.clone();
@@ -737,6 +777,8 @@ impl Rocket {
                 }))
             }
         });
+
+        tokio::spawn(broker.map(|_|()).collect());
 
         // NB: executor must be passed manually here, see hyperium/hyper#1537
         hyper::Server::builder(Incoming::from_listener(listener))

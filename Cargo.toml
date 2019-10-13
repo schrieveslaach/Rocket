@@ -13,6 +13,7 @@ members = [
   "examples/form_validation",
   "examples/hello_person",
   "examples/query_params",
+  "examples/hello_websocket",
   "examples/hello_world",
   "examples/manual_routes",
   "examples/optional_redirect",
