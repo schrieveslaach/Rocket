@@ -3,24 +3,36 @@
 #[macro_use]
 extern crate rocket;
 
-use rocket::message::{channel, Message};
+use rocket::router::Route;
+use rocket::handler::WebSocketHandler;
+use std::pin::Pin;
+use std::future::Future;
 
 #[get("/")]
 fn hello() -> &'static str {
     "Hello, websockets!"
 }
 
+//#[websocket("/echo")]
+//fn echo() {
+//
+//}
+
+#[derive(Clone)]
+struct X {
+
+}
+
+impl WebSocketHandler for X {
+    fn handle_upgrade(&self) -> Pin<Box<dyn Future<Output=()> + Send + 'static>> {
+        unimplemented!()
+    }
+}
+
 fn main() {
-    let (tx, rx) = channel();
 
-    std::thread::spawn(move || {
-        let duration = std::time::Duration::from_secs(1);
-        loop {
-            println!("Sending message");
-            tx.unbounded_send(Message{}).unwrap();
-            std::thread::sleep(duration);
-        }
-    });
+    let websocket = Route::websocket("/echo", X {});
 
-    let _ = rocket::ignite().receivers(vec![rx]).mount("/", routes![hello]).launch();
+    // TODO Route::websocket("/echo", );
+    let _ = rocket::ignite().mount("/", routes![hello]).mount("/", vec![websocket]).launch();
 }

@@ -6,6 +6,7 @@ use std::collections::hash_map::HashMap;
 use futures_core::future::BoxFuture;
 
 pub use self::route::Route;
+pub(crate) use self::route::HandlerEnum;
 
 use crate::request::Request;
 use crate::http::Method;
@@ -29,7 +30,7 @@ impl Router {
     }
 
     pub fn add(&mut self, route: Route) {
-        let selector = route.method;
+        let selector = route.selector();
         let entries = self.routes.entry(selector).or_insert_with(|| vec![]);
         let i = entries.binary_search_by_key(&route.rank, |r| r.rank)
             .unwrap_or_else(|i| i);

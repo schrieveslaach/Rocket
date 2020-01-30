@@ -4,7 +4,7 @@ use std::convert::From;
 use yansi::Paint;
 
 use crate::codegen::StaticRouteInfo;
-use crate::handler::Handler;
+use crate::handler::{Handler, WebSocketHandler};
 use crate::http::{Method, MediaType};
 use crate::http::route::{RouteSegment, Kind};
 use crate::error::RouteUriError;
@@ -16,10 +16,8 @@ use crate::http::uri::{Origin, Path, Query};
 pub struct Route {
     /// The name of this route, if one was given.
     pub name: Option<&'static str>,
-    /// The method this route matches against.
-    pub method: Method,
     /// The function that should be called when the route matches.
-    pub handler: Box<dyn Handler>,
+    pub(crate) handler: HandlerEnum,
     /// The base mount point of this `Route`.
     pub base: Origin<'static>,
     /// The uri (in Rocket's route format) that should be matched against. This
@@ -31,6 +29,18 @@ pub struct Route {
     pub format: Option<MediaType>,
     /// Cached metadata that aids in routing later.
     pub(crate) metadata: Metadata
+}
+
+#[derive(Clone)]
+pub(crate) enum HandlerEnum {
+    RequestAndResponse {
+        /// The method this route matches against.
+        method: Method,
+        handler:Box<dyn Handler>,
+    },
+    Websocket{
+        handler: Box<dyn WebSocketHandler>,
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -149,6 +159,39 @@ impl Route {
         route
     }
 
+    pub(crate) fn selector(&self) -> Method {
+        match &self.handler {
+            HandlerEnum::Websocket { .. } => Method::Get,
+            HandlerEnum::RequestAndResponse { method, .. } => method.clone()
+        }
+    }
+
+    pub fn websocket<S, H>(path: S, handler: H) -> Self
+        where S: AsRef<str>, H: WebSocketHandler + 'static
+    {
+        // TODO: copy paste from ranked
+        let path = path.as_ref();
+        let uri = Origin::parse_route(path)
+            .unwrap_or_else(|e| panic(path, e))
+            .to_normalized()
+            .into_owned();
+
+        let mut route = Route {
+            name: None,
+            format: None,
+            base: Origin::dummy(),
+            handler: HandlerEnum::Websocket {
+                handler: Box::new(handler),
+            },
+            metadata: Metadata::default(),
+            rank: 1, uri
+        };
+
+        route.update_metadata().unwrap_or_else(|e| panic(path, e));
+
+        route
+    }
+
     /// Creates a new route with the given rank, method, path, and handler with
     /// a base of `/`.
     ///
@@ -183,9 +226,12 @@ impl Route {
             name: None,
             format: None,
             base: Origin::dummy(),
-            handler: Box::new(handler),
+            handler: HandlerEnum::RequestAndResponse {
+                method,
+                handler: Box::new(handler)
+            },
             metadata: Metadata::default(),
-            method, rank, uri
+            rank, uri
         };
 
         route.update_metadata().unwrap_or_else(|e| panic(path, e));
@@ -282,7 +328,7 @@ impl Route {
 
 impl fmt::Display for Route {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", Paint::green(&self.method), Paint::blue(&self.uri))?;
+        write!(f, "{} {}", Paint::green(&self.selector()), Paint::blue(&self.uri))?;
 
         if self.rank > 1 {
             write!(f, " [{}]", Paint::default(&self.rank).bold())?;
@@ -305,7 +351,7 @@ impl fmt::Debug for Route {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Route")
             .field("name", &self.name)
-            .field("method", &self.method)
+            .field("method", &self.selector())
             .field("base", &self.base)
             .field("uri", &self.uri)
             .field("rank", &self.rank)

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use futures_core::future::{Future, BoxFuture};
 use futures_channel::{mpsc, oneshot};
-use futures_util::{lock::Mutex, future::FutureExt, stream::StreamExt};
+use futures_util::{future::FutureExt, stream::StreamExt};
 
 use yansi::Paint;
 use state::Container;
@@ -16,9 +16,8 @@ use crate::{logger, handler};
 use crate::config::{self, Config, LoggedValue};
 use crate::request::{Request, FormItems};
 use crate::data::Data;
-use crate::message::{Broker, Receiver};
 use crate::response::{Body, Response};
-use crate::router::{Router, Route};
+use crate::router::{Router, Route, HandlerEnum};
 use crate::catcher::{self, Catcher};
 use crate::outcome::Outcome;
 use crate::error::{LaunchError, LaunchErrorKind};
@@ -36,8 +35,6 @@ use crate::http::uri::Origin;
 pub struct Rocket {
     pub(crate) config: Config,
     router: Router,
-    upgrades: Arc<Mutex<Vec<Arc<Mutex<hyper::Upgraded>>>>>,
-    broker: Broker,
     default_catchers: HashMap<u16, Catcher>,
     catchers: HashMap<u16, Catcher>,
     pub(crate) state: Container,
@@ -63,12 +60,6 @@ fn hyper_service_fn(
     let (tx, rx) = oneshot::channel();
 
     tokio::spawn(async move {
-        if hyp_req.headers().contains_key("upgrade") {
-            let r = rocket.handle_upgrade(hyp_req);
-            rocket.issue_response(r, tx).await;
-            return;
-        }
-
         // Get all of the information from Hyper.
         let (h_parts, h_body) = hyp_req.into_parts();
 
@@ -173,25 +164,6 @@ impl Rocket {
 
             Ok(())
         }
-    }
-
-    #[inline]
-    fn handle_upgrade(&self, req: hyper::Request<hyper::Body>) -> Response<'_> {
-        let upgrades = self.upgrades.clone();
-
-        tokio::spawn(async move {
-            match req.into_body().on_upgrade().await {
-                Ok(upgraded) => {
-                    let mut upgrades = upgrades.lock().await;
-                    upgrades.push(Arc::new(Mutex::new(upgraded)));
-                }
-                Err(e) => error!("upgrade error: {}", e)
-            };
-        });
-
-        Response::build()
-            .status(Status::SwitchingProtocols)
-            .finalize()
     }
 }
 
@@ -322,7 +294,22 @@ impl Rocket {
                 request.set_route(route);
 
                 // Dispatch the request to the handler.
-                let outcome = route.handler.handle(request, data).await;
+                let outcome = match &route.handler {
+                    HandlerEnum::RequestAndResponse{ method: _, handler } => {
+                        handler.handle(request, data).await
+                    }
+                    HandlerEnum::Websocket{ handler } => {
+                        if !request.headers().contains("upgrade") {
+                            error_!("Request is not upgrading connection: {}.", request);
+                            return Outcome::Forward(data);
+                        }
+
+                        tokio::spawn(handler.handle_upgrade());
+
+                        unimplemented!()
+                    }
+                };
+
 
                 // Check if the request processing completed (Some) or if the request needs
                 // to be forwarded. If it does, continue the loop (None) to try again.
@@ -469,13 +456,9 @@ impl Rocket {
 
         let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
 
-        let upgrades = Arc::new(Mutex::new(Vec::new()));
-
         let rocket = Rocket {
             config,
             router: Router::new(),
-            upgrades: upgrades.clone(),
-            broker:Broker::new(upgrades.clone()),
             default_catchers: catcher::defaults::get(),
             catchers: catcher::defaults::get(),
             state: Container::new(),
@@ -577,9 +560,8 @@ impl Rocket {
     }
 
     #[inline]
-    pub fn receivers(mut self, receivers: Vec<Receiver>) -> Self {
-        self.broker.extend_with(receivers);
-        self
+    pub fn websockets<W: Into<Vec<Route>>>(self, websockets: W) -> Self {
+        self.mount("/", websockets)
     }
 
     /// Registers all of the catchers in the supplied vector.
@@ -765,8 +747,6 @@ impl Rocket {
         let mut shutdown_receiver = self.shutdown_receiver
             .take().expect("shutdown receiver has already been used");
 
-        let broker = std::mem::replace(&mut self.broker, Broker::empty());
-
         let rocket = Arc::new(self);
         let service = hyper::make_service_fn(move |connection: &<L as Listener>::Connection| {
             let rocket = rocket.clone();
@@ -777,8 +757,6 @@ impl Rocket {
                 }))
             }
         });
-
-        tokio::spawn(broker.map(|_|()).collect());
 
         // NB: executor must be passed manually here, see hyperium/hyper#1537
         hyper::Server::builder(Incoming::from_listener(listener))

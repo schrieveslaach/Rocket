@@ -319,3 +319,49 @@ impl<'r> Outcome<'r> {
         outcome::Outcome::Forward(data)
     }
 }
+
+
+
+
+
+
+
+
+
+
+pub trait WebSocketHandler: WSCloneable + Send + Sync + 'static  {
+    fn handle_upgrade(&self) -> BoxFuture<'static, ()>;
+}
+
+/// Unfortunate but necessary hack to be able to clone a `Box<Handler>`.
+///
+/// This trait should _never_ (and cannot, due to coherence) be implemented by
+/// any type. Instead, implement `Clone`. All types that implement `Clone` and
+/// `Handler` automatically implement `Cloneable`.
+pub trait WSCloneable {
+    /// Clones `self`.
+    fn clone_ws_handler(&self) -> Box<dyn WebSocketHandler>;
+}
+
+impl<T: WebSocketHandler + Clone> WSCloneable for T {
+    #[inline(always)]
+    fn clone_ws_handler(&self) -> Box<dyn WebSocketHandler> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn WebSocketHandler> {
+    #[inline(always)]
+    fn clone(&self) -> Box<dyn WebSocketHandler> {
+        self.clone_ws_handler()
+    }
+}
+
+//impl<F: Clone + Sync + Send + 'static> WebSocketHandler for F
+//    where F: Fn() -> BoxFuture<'static, ()>
+//{
+//    #[inline(always)]
+//    fn handle_upgrade<'r>(&self) -> BoxFuture<'r, ()> {
+//        unimplemented!()
+//    }
+//}

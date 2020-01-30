@@ -19,7 +19,7 @@ impl Route {
     /// missing, queries do not impact whether two routes collide.
     #[doc(hidden)]
     pub fn collides_with(&self, other: &Route) -> bool {
-        self.method == other.method
+        self.selector() == other.selector()
             && self.rank == other.rank
             && paths_collide(self, other)
             && formats_collide(self, other)
@@ -39,7 +39,7 @@ impl Route {
     ///     - If no query in route, requests with/without queries match.
     #[doc(hidden)]
     pub fn matches(&self, req: &Request<'_>) -> bool {
-        self.method == req.method()
+        self.selector() == req.method()
             && paths_match(self, req)
             && queries_match(self, req)
             && formats_match(self, req)
@@ -112,7 +112,7 @@ fn queries_match(route: &Route, request: &Request<'_>) -> bool {
 fn formats_collide(route: &Route, other: &Route) -> bool {
     // When matching against the `Accept` header, the client can always provide
     // a media type that will cause a collision through non-specificity.
-    if !route.method.supports_payload() {
+    if !route.selector().supports_payload() {
         return true;
     }
 
@@ -127,7 +127,7 @@ fn formats_collide(route: &Route, other: &Route) -> bool {
 }
 
 fn formats_match(route: &Route, request: &Request<'_>) -> bool {
-    if !route.method.supports_payload() {
+    if !route.selector().supports_payload() {
         route.format.as_ref()
             .and_then(|a| request.format().map(|b| (a, b)))
             .map(|(a, b)| media_types_collide(a, b))

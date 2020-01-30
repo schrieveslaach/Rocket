@@ -112,7 +112,6 @@ pub mod handler;
 pub mod fairing;
 pub mod error;
 pub mod shutdown;
-pub mod message;
 
 // Reexport of HTTP everything.
 pub mod http {
@@ -125,7 +124,7 @@ pub mod http {
     pub use rocket_http::*;
 }
 
-mod router;
+pub mod router;
 mod rocket;
 mod codegen;
 mod catcher;
