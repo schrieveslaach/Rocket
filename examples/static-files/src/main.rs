@@ -17,11 +17,17 @@ mod manual {
 
         NamedFile::open(path).await.ok()
     }
+
+    #[rocket::get("/with-caching/rocket-icon.jpg")]
+    pub async fn cached_icon() -> Option<NamedFile> {
+        NamedFile::with_last_modified_date("static/rocket-icon.jpg").await.ok()
+    }
+
 }
 
 #[rocket::launch]
 fn rocket() -> _ {
     rocket::build()
-        .mount("/", rocket::routes![manual::second])
+        .mount("/", rocket::routes![manual::second, manual::cached_icon])
         .mount("/", StaticFiles::from(crate_relative!("static")))
 }

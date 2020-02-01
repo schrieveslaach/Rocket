@@ -133,6 +133,12 @@ impl Options {
     /// that would be served is a directory.
     pub const NormalizeDirs: Options = Options(0b0100);
 
+    /// `Options` enabling caching based on the `Last-Modified` header. When
+    /// this is enabled, the [`StaticFiles`] handler will at the `Last-Modified`
+    /// header baesd on the modification datetime of the files in the served
+    /// directory.
+    pub const LastModifiedHeader: Options = Options(0b1000);
+
     /// Returns `true` if `self` is a superset of `other`. In other words,
     /// returns `true` if all of the options in `other` are also in `self`.
     ///
@@ -381,11 +387,19 @@ impl Handler for StaticFiles {
                     return Outcome::forward(data);
                 }
 
-                let index = NamedFile::open(p.join("index.html")).await.ok();
+                let index = named_file(p.join("index.html"), &self.options).await;
                 Outcome::from_or_forward(req, data, index)
             },
-            Some(p) => Outcome::from_or_forward(req, data, NamedFile::open(p).await.ok()),
+            Some(p) => Outcome::from_or_forward(req, data, named_file(p, &self.options).await),
             None => Outcome::forward(data),
         }
+    }
+}
+
+async fn named_file<P: AsRef<Path>>(path: P, options: &Options) -> Option<NamedFile> {
+    if options.contains(Options::LastModifiedHeader) {
+        NamedFile::with_last_modified_date(path).await.ok()
+    } else {
+        NamedFile::open(path).await.ok()
     }
 }

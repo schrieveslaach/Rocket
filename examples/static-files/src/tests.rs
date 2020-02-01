@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Read;
 
 use rocket::local::blocking::Client;
-use rocket::http::Status;
+use rocket::http::{Header, Status};
 
 use super::rocket;
 
@@ -25,7 +25,8 @@ fn read_file_content(path: &str) -> Vec<u8> {
     let mut fp = File::open(&path).expect(&format!("Can't open {}", path));
     let mut file_content = vec![];
 
-    fp.read_to_end(&mut file_content).expect(&format!("Reading {} failed.", path));
+    fp.read_to_end(&mut file_content)
+        .expect(&format!("Reading {} failed.", path));
     file_content
 }
 
@@ -68,4 +69,61 @@ fn test_invalid_path() {
     test_query_file("/thou_shalt_not_exist", None, Status::NotFound);
     test_query_file("/thou/shalt/not/exist", None, Status::NotFound);
     test_query_file("/thou/shalt/not/exist?a=b&c=d", None, Status::NotFound);
+}
+
+#[test]
+fn test_valid_last_modified() {
+    let client = Client::tracked(rocket()).unwrap();
+    let response = client.get("/with-caching/rocket-icon.jpg").dispatch();
+    assert_eq!(response.status(), Status::Ok);
+
+    let last_modified = response
+        .headers()
+        .get("Last-Modified")
+        .next()
+        .expect("Response should contain Last-Modified header")
+        .to_string();
+
+    let mut request = client.get("/with-caching/rocket-icon.jpg");
+    request.add_header(Header::new("If-Modified-Since".to_string(), last_modified));
+    let response = request.dispatch();
+
+    assert_eq!(response.status(), Status::NotModified);
+}
+
+#[test]
+fn test_none_matching_last_modified() {
+    let client = Client::tracked(rocket()).unwrap();
+
+    let mut request = client.get("/with-caching/rocket-icon.jpg");
+    request.add_header(Header::new(
+        "If-Modified-Since".to_string(),
+        "Wed, 21 Oct 2015 07:28:00 GMT",
+    ));
+    let response = request.dispatch();
+
+    assert_eq!(response.status(), Status::Ok);
+
+    let mut request = client.get("/with-caching/rocket-icon.jpg");
+    request.add_header(Header::new(
+        "If-Modified-Since".to_string(),
+        "Wed, 21 Oct 1900 07:28:00 GMT",
+    ));
+    let response = request.dispatch();
+
+    assert_eq!(response.status(), Status::Ok);
+}
+
+#[test]
+fn test_invalid_last_modified() {
+    let client = Client::tracked(rocket()).unwrap();
+
+    let mut request = client.get("/with-caching/rocket-icon.jpg");
+    request.add_header(Header::new(
+        "If-Modified-Since".to_string(),
+        "random header",
+    ));
+    let response = request.dispatch();
+
+    assert_eq!(response.status(), Status::Ok);
 }
